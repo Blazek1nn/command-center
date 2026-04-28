@@ -34,7 +34,7 @@ as it arrives, with per-task cost/token tracking.
 Token optimization: integrated RTK (Rust Token Killer) compresses bash outputs
 60–90% before they enter agent context.
 
-GitHub: https://github.com/YOUR_USERNAME/command-center
+GitHub: https://github.com/Blazek1nn/command-center
 ```
 
 ---
@@ -71,7 +71,7 @@ SSE for real-time streaming, SQLite for persistence.
 The Manager prompt enforces aggressive parallelism — tasks in different projects,
 read-only tasks, and tasks touching different files always run simultaneously.
 
-GitHub: https://github.com/YOUR_USERNAME/command-center
+GitHub: https://github.com/Blazek1nn/command-center
 
 Demo video in comments.
 ```

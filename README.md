@@ -99,7 +99,7 @@ The Manager assigns the right model to each task automatically:
 ### 1. Clone
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/command-center
+git clone https://github.com/Blazek1nn/command-center
 cd command-center
 ```
 
