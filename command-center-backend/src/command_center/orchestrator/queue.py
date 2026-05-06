@@ -4,7 +4,7 @@ Não é um broker: é uma view sobre a tabela `tasks` filtrando por status.
 Útil para o ralph_loop e endpoints de status."""
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from command_center.db import session as session_module
 from command_center.db.models import Task, TaskStatus
@@ -52,14 +52,13 @@ class TaskQueue:
 
     async def count_by_status(self) -> dict[str, int]:
         async with session_module.AsyncSessionLocal() as sess:
-            counts: dict[str, int] = {}
-            for status in TaskStatus:
-                n = (
-                    await sess.execute(
-                        select(Task).where(Task.status == status)
-                    )
-                ).scalars().all()
-                counts[status.value] = len(n)
+            result = await sess.execute(
+                select(Task.status, func.count(Task.id)).group_by(Task.status)
+            )
+            counts: dict[str, int] = {s.value: 0 for s in TaskStatus}
+            for status, n in result.all():
+                key = status.value if hasattr(status, "value") else str(status)
+                counts[key] = n
             return counts
 
 

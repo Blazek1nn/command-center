@@ -1,0 +1,119 @@
+/* Welcome panel styles — reuses CSS vars from chat.css */
+body {
+  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  background: var(--vscode-editor-background, #1e1e1e);
+  color: var(--vscode-editor-foreground, #d4d4d4);
+  margin: 0;
+  padding: 0 24px 32px;
+  font-size: 13px;
+  line-height: 1.6;
+  max-width: 560px;
+}
+
+h1 { font-size: 20px; font-weight: 600; margin: 28px 0 6px; }
+h2 { font-size: 13px; font-weight: 600; margin: 20px 0 8px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--vscode-descriptionForeground, #888); }
+
+p { margin: 0 0 10px; }
+code {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  background: var(--vscode-textCodeBlock-background, #2d2d2d);
+  border-radius: 3px;
+  padding: 1px 5px;
+}
+
+.hero {
+  border: 1px solid var(--vscode-panel-border, #333);
+  border-radius: 8px;
+  padding: 16px;
+  margin: 16px 0 24px;
+  background: var(--vscode-sideBar-background, #252526);
+}
+
+.step {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 14px;
+  align-items: flex-start;
+}
+
+.step-num {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--vscode-button-background, #0e639c);
+  color: var(--vscode-button-foreground, #fff);
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.step-body { flex: 1; }
+.step-title { font-weight: 500; margin-bottom: 2px; }
+.step-desc { font-size: 12px; color: var(--vscode-descriptionForeground, #888); }
+
+.actions { display: flex; gap: 10px; margin-top: 20px; flex-wrap: wrap; }
+
+button {
+  padding: 6px 16px;
+  border-radius: 4px;
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  font-weight: 500;
+}
+
+.btn-primary {
+  background: var(--vscode-button-background, #0e639c);
+  color: var(--vscode-button-foreground, #fff);
+}
+
+.btn-secondary {
+  background: var(--vscode-button-secondaryBackground, #3a3d41);
+  color: var(--vscode-button-secondaryForeground, #ccc);
+  border: 1px solid var(--vscode-panel-border, #444);
+}
+
+button:hover { opacity: 0.85; }
+
+.badge {
+  display: inline-block;
+  font-size: 10px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  border-radius: 3px;
+  padding: 1px 6px;
+  border: 1px solid var(--vscode-panel-border, #444);
+  color: var(--vscode-descriptionForeground, #888);
+  background: var(--vscode-sideBar-background, #252526);
+  vertical-align: middle;
+}
+
+.status { display: flex; align-items: center; gap: 8px; margin: 12px 0; font-size: 12px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.dot-checking { background: var(--vscode-descriptionForeground, #888); animation: pulse 1.5s ease-in-out infinite; }
+.dot-ok  { background: #4caf50; }
+.dot-err { background: #f44336; }
+
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+.task-example {
+  background: var(--vscode-textCodeBlock-background, #2d2d2d);
+  border: 1px solid var(--vscode-panel-border, #333);
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: 12px;
+  margin: 8px 0 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: opacity 0.1s;
+}
+
+.task-example:hover { opacity: 0.8; }
+.task-example-icon { font-size: 16px; }

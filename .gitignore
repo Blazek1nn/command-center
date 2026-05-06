@@ -13,8 +13,18 @@ node_modules/
 
 # DB / runtime
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.log
+
+# Env files (all variants, all subdirs)
+**/.env
+.env.*
+*.env
+
+# Private Claude Code session data
+.claude/
 
 # OS
 .DS_Store
