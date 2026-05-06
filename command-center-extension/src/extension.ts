@@ -13,11 +13,11 @@ import * as vscode from "vscode";
 import { ChatPanel } from "./ChatPanel";
 import { ActivityProvider } from "./ActivityProvider";
 import { WelcomePanel } from "./WelcomePanel";
-import { checkBackendAvailable, getDefaultBackendUrl } from "./backendClient";
+import { checkBackendAvailable } from "./backendClient";
 
 export function activate(context: vscode.ExtensionContext): void {
   const config = vscode.workspace.getConfiguration("commandCenter");
-  const backendUrl = getDefaultBackendUrl({ get: (k) => config.get(k) });
+  const backendUrl = config.get<string>("backendUrl") ?? "http://localhost:8000";
 
   // ── Sidebar activity provider ────────────────────────────────────────────
   const activityProvider = new ActivityProvider(context.extensionUri, backendUrl);

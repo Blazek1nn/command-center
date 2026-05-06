@@ -7,7 +7,11 @@
 export type ExtensionMessage =
   | { type: "init"; projectDir: string; projectName: string; backendUrl: string }
   | { type: "backendStatus"; available: boolean }
-  | { type: "theme"; kind: "light" | "dark" | "high-contrast" };
+  | { type: "theme"; kind: "light" | "dark" | "high-contrast" }
+  // SSE proxy — extension host streams backend events to the WebView
+  | { type: "sseEvent"; event: string; data: unknown }
+  | { type: "sseDone" }
+  | { type: "sseError"; error: string };
 
 // WebView → Extension
 export type WebviewMessage =
@@ -15,7 +19,11 @@ export type WebviewMessage =
   | { type: "openExternal"; url: string }
   | { type: "copyToClipboard"; text: string }
   | { type: "checkBackend" }
-  | { type: "getProjectDir" };
+  | { type: "getProjectDir" }
+  // SSE proxy — WebView asks extension host to start a streaming call
+  | { type: "chatStream"; message: string; conversationId: number | null }
+  | { type: "dispatchStream"; tasks: unknown[]; conversationId: number | null; managerModel: string; originalMessage: string }
+  | { type: "cancelStream" };
 
 export interface BackendStatus {
   available: boolean;

@@ -4,12 +4,17 @@
  * No build step, no React, no external deps. Pure DOM manipulation.
  * Runs inside VS Code's WebView sandbox (no Node access, no eval).
  *
+ * SSE PROXY ARCHITECTURE:
+ *   All streaming calls go through the extension host (Node.js) via postMessage.
+ *   The WebView's fetch() is routed through VS Code's internal proxy which
+ *   buffers SSE responses — bypassing it via the extension host fixes streaming.
+ *
  * State machine:
- *   idle → thinking (sending message)
- *        → streaming_plan (manager_delta events)
+ *   idle → thinking (sent chatStream to host)
+ *        → streaming (manager_thinking / manager_delta events)
  *        → awaiting_approval (plan_created with tasks)
  *        → executing (dispatch in progress)
- *        → idle (done)
+ *        → idle (done / error)
  */
 
 (function () {
@@ -30,7 +35,6 @@
     activeTasks: {}, // index → { title, status, actions[], cost_usd }
     conversationId: null,
     streamingText: "",
-    abortController: null,
   };
 
   // ── DOM refs ─────────────────────────────────────────────────────────────
@@ -38,8 +42,6 @@
 
   // ── Boot ─────────────────────────────────────────────────────────────────
   render();
-
-  // Tell extension we're ready
   vscode.postMessage({ type: "ready" });
 
   // ── Extension → WebView messages ─────────────────────────────────────────
@@ -52,91 +54,39 @@
         state.projectName = msg.projectName;
         render();
         break;
+
       case "backendStatus":
         state.backendOnline = msg.available;
         render();
         break;
+
       case "theme":
         document.body.dataset.theme = msg.kind;
+        break;
+
+      // ── SSE proxy events from extension host ─────────────────────────
+
+      case "sseEvent":
+        processSseEvent(msg.event, msg.data);
+        break;
+
+      case "sseDone":
+        if (state.phase !== "idle" && state.phase !== "awaiting_approval") {
+          state.phase = "idle";
+          render();
+        }
+        break;
+
+      case "sseError":
+        state.phase = "idle";
+        pushSystemMsg(`⚠ ${msg.error}`);
+        render();
         break;
     }
   });
 
-  // ── Send message ─────────────────────────────────────────────────────────
-  async function sendMessage(text) {
-    if (!text.trim() || state.phase !== "idle") return;
-    if (!state.backendOnline) {
-      vscode.postMessage({ type: "checkBackend" });
-      pushSystemMsg("Backend not available. Start it with: just dev");
-      return;
-    }
-
-    pushUserMsg(text);
-    state.phase = "thinking";
-    state.streamingText = "";
-    state.currentPlan = null;
-    state.activeTasks = {};
-    render();
-
-    const ac = new AbortController();
-    state.abortController = ac;
-
-    try {
-      const res = await fetch(`${state.backendUrl}/api/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: text,
-          conversation_id: state.conversationId,
-          plan_only: true,
-          history: null,
-        }),
-        signal: ac.signal,
-      });
-
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const parts = buf.split("\n\n");
-        buf = parts.pop() ?? "";
-        for (const part of parts) {
-          processSSEChunk(part);
-        }
-      }
-    } catch (err) {
-      if (err.name !== "AbortError") {
-        state.phase = "idle";
-        pushSystemMsg(`Error: ${err.message}`);
-        render();
-      }
-    } finally {
-      state.abortController = null;
-    }
-  }
-
   // ── SSE event processor ───────────────────────────────────────────────────
-  function processSSEChunk(raw) {
-    const lines = raw.split("\n");
-    let eventType = "";
-    let dataStr = "";
-    for (const line of lines) {
-      if (line.startsWith("event:")) eventType = line.slice(6).trim();
-      if (line.startsWith("data:")) dataStr = line.slice(5).trim();
-    }
-    if (!eventType || !dataStr) return;
-
-    let data;
-    try { data = JSON.parse(dataStr); } catch { return; }
-
+  function processSseEvent(eventType, data) {
     switch (eventType) {
       case "conversation_started":
         state.conversationId = data.conversation_id;
@@ -159,10 +109,7 @@
         if (data.tasks && data.tasks.length > 0) {
           state.phase = "awaiting_approval";
         } else {
-          // small talk — direct_reply path, no tasks to approve
-          if (data.direct_reply) {
-            pushManagerMsg(data.direct_reply);
-          }
+          if (data.direct_reply) pushManagerMsg(data.direct_reply);
           state.phase = "idle";
         }
         render();
@@ -211,8 +158,8 @@
         pushManagerMsg(data.report);
         if (data.usage?.total?.cost_usd != null) {
           pushSystemMsg(
-            `Done · Total cost: $${data.usage.total.cost_usd.toFixed(4)} · ` +
-            `${data.usage.total.input_tokens + data.usage.total.output_tokens} tokens`
+            `Done · $${data.usage.total.cost_usd.toFixed(4)} · ` +
+            `${(data.usage.total.input_tokens ?? 0) + (data.usage.total.output_tokens ?? 0)} tokens`
           );
         }
         state.phase = "idle";
@@ -221,7 +168,6 @@
 
       case "done":
         state.phase = "idle";
-        state.abortController = null;
         render();
         break;
 
@@ -233,8 +179,32 @@
     }
   }
 
-  // ── Dispatch approved plan ────────────────────────────────────────────────
-  async function approvePlan() {
+  // ── Send message (proxy through extension host) ───────────────────────────
+  function sendMessage(text) {
+    if (!text.trim() || state.phase !== "idle") return;
+    if (!state.backendOnline) {
+      vscode.postMessage({ type: "checkBackend" });
+      pushSystemMsg("Backend offline. Start it with: just dev");
+      return;
+    }
+
+    pushUserMsg(text);
+    state.phase = "thinking";
+    state.streamingText = "";
+    state.currentPlan = null;
+    state.activeTasks = {};
+    render();
+
+    // Ask extension host to open the SSE stream (bypasses WebView proxy buffering)
+    vscode.postMessage({
+      type: "chatStream",
+      message: text,
+      conversationId: state.conversationId,
+    });
+  }
+
+  // ── Dispatch approved plan (proxy through extension host) ─────────────────
+  function approvePlan() {
     if (!state.currentPlan) return;
     state.phase = "executing";
     state.activeTasks = {};
@@ -243,59 +213,25 @@
     }
     render();
 
-    const ac = new AbortController();
-    state.abortController = ac;
-
-    try {
-      const res = await fetch(`${state.backendUrl}/api/dispatch`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          tasks: state.currentPlan.tasks,
-          conversation_id: state.conversationId,
-          manager_model: state.currentPlan.model ?? "sonnet",
-          original_message: state.currentPlan.understanding ?? "",
-        }),
-        signal: ac.signal,
-      });
-
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const parts = buf.split("\n\n");
-        buf = parts.pop() ?? "";
-        for (const part of parts) processSSEChunk(part);
-      }
-    } catch (err) {
-      if (err.name !== "AbortError") {
-        pushSystemMsg(`Dispatch error: ${err.message}`);
-        state.phase = "idle";
-        render();
-      }
-    } finally {
-      state.abortController = null;
-    }
+    vscode.postMessage({
+      type: "dispatchStream",
+      tasks: state.currentPlan.tasks,
+      conversationId: state.conversationId,
+      managerModel: state.currentPlan.model ?? "sonnet",
+      originalMessage: state.currentPlan.understanding ?? "",
+    });
   }
 
   function rejectPlan() {
     state.currentPlan = null;
     state.phase = "idle";
+    vscode.postMessage({ type: "cancelStream" });
     pushSystemMsg("Plan rejected. Send a new message to start over.");
     render();
   }
 
   function cancelRequest() {
-    if (state.abortController) {
-      state.abortController.abort();
-      state.abortController = null;
-    }
+    vscode.postMessage({ type: "cancelStream" });
     state.phase = "idle";
     pushSystemMsg("Cancelled.");
     render();
@@ -342,7 +278,6 @@
       if (el) delete el.dataset.streaming;
       _streamingEl = null;
     }
-    // Update the last message in state
     const last = state.messages[state.messages.length - 1];
     if (last?.streaming) {
       last.streaming = false;
@@ -358,9 +293,7 @@
     const task = state.activeTasks[index];
     card.className = `cc-task-card ${task.status}`;
     const spinner = card.querySelector(".cc-spinner");
-    if (spinner) {
-      if (task.status !== "running") spinner.remove();
-    }
+    if (spinner && task.status !== "running") spinner.remove();
     const costEl = card.querySelector(".cc-task-card-cost");
     if (costEl && task.cost_usd != null) {
       costEl.textContent = `$${task.cost_usd.toFixed(4)}`;
@@ -378,6 +311,7 @@
 
   // ── Full render ───────────────────────────────────────────────────────────
   function render() {
+    _streamingEl = null; // DOM wiped — reset streaming ref
     root.innerHTML = "";
     root.appendChild(buildLayout());
   }
@@ -398,8 +332,9 @@
     // Offline banner
     if (!state.backendOnline) {
       const banner = div("cc-offline-banner", "");
-      banner.innerHTML = `⚠ Backend offline · <a id="cc-check-backend">check again</a> or run <code>just dev</code>`;
-      banner.querySelector("#cc-check-backend").addEventListener("click", () => {
+      banner.innerHTML = `⚠ Backend offline · <a id="cc-check-backend" href="#">check again</a> or run <code>just dev</code>`;
+      banner.querySelector("#cc-check-backend").addEventListener("click", (e) => {
+        e.preventDefault();
         vscode.postMessage({ type: "checkBackend" });
       });
       wrap.appendChild(banner);
@@ -407,7 +342,6 @@
 
     // Messages list
     const msgList = div("cc-messages", "");
-    msgList.id = "cc-msg-list";
 
     if (state.messages.length === 0) {
       const empty = div("cc-msg system", "");
@@ -434,7 +368,7 @@
       msgList.appendChild(buildTaskCard(Number(idx), task));
     }
 
-    // Plan editor (awaiting approval)
+    // Plan editor
     if (state.phase === "awaiting_approval" && state.currentPlan?.tasks?.length) {
       msgList.appendChild(buildPlanEditor(state.currentPlan));
     }
@@ -514,8 +448,7 @@
 
     const header = div("cc-task-card-header", "");
     if (task.status === "running") {
-      const spin = div("cc-spinner", "");
-      header.appendChild(spin);
+      header.appendChild(div("cc-spinner", ""));
     } else if (task.status === "done") {
       header.appendChild(span("✓ "));
     } else if (task.status === "failed") {
@@ -558,7 +491,6 @@
 
   function buildInputArea() {
     const area = div("cc-input-area", "");
-
     const wrap = div("cc-textarea-wrap", "");
     const ta = document.createElement("textarea");
     ta.className = "cc-textarea";
@@ -576,15 +508,9 @@
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         const text = ta.value.trim();
-        if (text) {
-          ta.value = "";
-          ta.style.height = "auto";
-          sendMessage(text);
-        }
+        if (text) { ta.value = ""; ta.style.height = "auto"; sendMessage(text); }
       }
-      if (e.key === "Escape" && state.phase !== "idle") {
-        cancelRequest();
-      }
+      if (e.key === "Escape" && state.phase !== "idle") cancelRequest();
     });
 
     const sendBtn = button("↑", "cc-btn cc-btn-primary cc-send-btn");
@@ -592,34 +518,24 @@
     sendBtn.disabled = state.phase !== "idle";
     sendBtn.addEventListener("click", () => {
       const text = ta.value.trim();
-      if (text) {
-        ta.value = "";
-        ta.style.height = "auto";
-        sendMessage(text);
-      }
+      if (text) { ta.value = ""; ta.style.height = "auto"; sendMessage(text); }
     });
+
+    wrap.appendChild(ta);
+    wrap.appendChild(sendBtn);
 
     if (state.phase !== "idle") {
       const cancelBtn = button("✕", "cc-btn cc-btn-secondary cc-send-btn");
       cancelBtn.title = "Cancel (Esc)";
       cancelBtn.style.marginLeft = "4px";
       cancelBtn.addEventListener("click", cancelRequest);
-      wrap.appendChild(ta);
-      wrap.appendChild(sendBtn);
       wrap.appendChild(cancelBtn);
-    } else {
-      wrap.appendChild(ta);
-      wrap.appendChild(sendBtn);
     }
 
     area.appendChild(wrap);
+    area.appendChild(div("cc-hint", "Enter to send · Shift+Enter for newline · Esc to cancel"));
 
-    const hint = div("cc-hint", "Enter to send · Shift+Enter for newline · Esc to cancel");
-    area.appendChild(hint);
-
-    // Auto-focus textarea
     setTimeout(() => ta.focus(), 50);
-
     return area;
   }
 

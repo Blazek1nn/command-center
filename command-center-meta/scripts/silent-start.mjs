@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
+import { existsSync } from "node:fs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..", "..");
@@ -25,10 +26,7 @@ function resolveBin(name, windowsFallbacks = []) {
   } catch { /* not on PATH */ }
   for (const fb of windowsFallbacks) {
     const path = fb.replace("%USERPROFILE%", process.env.USERPROFILE ?? "");
-    try {
-      const { existsSync } = await import("node:fs");
-      if (existsSync(path)) return path;
-    } catch { /* skip */ }
+    if (existsSync(path)) return path;
   }
   return name; // let the OS resolve it — will error if missing
 }

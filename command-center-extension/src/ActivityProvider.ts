@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { checkBackendAvailable } from "./backendClient";
+import { ChatPanel } from "./ChatPanel";
 
 /**
  * ActivityProvider drives the sidebar WebView ("Agent Activity").
@@ -39,6 +40,22 @@ export class ActivityProvider implements vscode.WebviewViewProvider {
     };
 
     webviewView.webview.html = this._getHtml(webviewView.webview);
+
+    // Auto-open chat panel when the user clicks the CC sidebar icon.
+    // Only opens if chat isn't already visible — doesn't re-open if user closed it intentionally.
+    const openChatIfNeeded = () => {
+      if (!ChatPanel.current) {
+        ChatPanel.createOrShow(this._extensionUri);
+      }
+    };
+
+    // First resolve = user clicked the CC icon for the first time this session
+    setTimeout(openChatIfNeeded, 150);
+
+    // Subsequent clicks: sidebar transitions from hidden → visible
+    webviewView.onDidChangeVisibility(() => {
+      if (webviewView.visible) openChatIfNeeded();
+    });
 
     webviewView.webview.onDidReceiveMessage(async (msg) => {
       if (msg.type === "checkBackend") {
