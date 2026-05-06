@@ -1,225 +1,175 @@
 # Command Center
 
-> Tell it what needs to be done. Watch your agents do it — in parallel.
+> Plan, approve, and dispatch coding tasks to a fleet of Claude Code agents — without losing the thread.
 
-A multi-agent orchestration system where you (the CEO) describe work in natural language, a Manager decomposes it into parallel tasks, and multiple Employee agents execute them simultaneously — all powered by **Claude Code CLI**, not the raw API.
+Command Center is an **orchestration layer on top of Claude Code**. You describe what you want; a Manager agent drafts a plan; you approve or edit it; Worker agents execute in parallel inside your project; you see every file touched and every command run, in real time.
 
-![Command Center UI](docs/demo.gif)
+Built for solo devs and small teams who want to delegate routine work to agents but still hold the steering wheel.
+
+```
+┌─────────┐   plan    ┌─────────┐  approve   ┌──────────────┐
+│   You   │──────────▶│ Manager │───────────▶│  Worker × N  │──▶ git, files, MCPs
+└─────────┘           └─────────┘            └──────────────┘
+     ▲                                               │
+     └───────────── live progress (SSE) ─────────────┘
+```
 
 ---
 
-## Why this is different
+## Why plan-then-execute wins
 
-Most agent frameworks call the Anthropic API directly. This one uses **`claude --print`** — the same Claude Code CLI you already have authenticated. That means:
+Auto-execute coding agents fail silently and waste tokens. Pure chat agents make you babysit them. Command Center sits in between: **the agent shows its plan first, you edit if needed, then it goes.** You always see what happened.
 
-- ✅ No `ANTHROPIC_API_KEY` needed — uses your Claude Pro/Max subscription
-- ✅ Full tool access: file I/O, bash, web search, code execution
-- ✅ Claude's built-in permission system and safety guardrails
-- ✅ Token optimization via [RTK](https://github.com/rtk-ai/rtk) (60–90% savings on bash output)
+Concretely, you get:
+
+- **Plan approval** — review and edit the full task breakdown before any code is touched
+- **Parallel workers** — multiple tasks run concurrently, each with its own model, prompt, and progress stream
+- **Per-project skills + MCPs** — drop a `.claude/skills/` dir or `mcp.json` into your project; Command Center loads them per task
+- **Session memory** — what was decided in conversation #3 is recallable in conversation #47
+- **Cost transparency** — every task reports `cost_usd`. No surprise bills
+- **Auto-PR** — a finished task can open a GitHub PR with the diff
+
+No `ANTHROPIC_API_KEY` needed — uses the `claude` CLI with your existing Pro/Max subscription.
+
+---
+
+## 5-minute setup
+
+**Prerequisites:**
+
+| Tool            | Min version | Purpose                                                                             |
+| --------------- | ----------- | ----------------------------------------------------------------------------------- |
+| Python          | 3.13        | Backend                                                                             |
+| Node.js         | ≥ 20        | Frontend                                                                            |
+| pnpm            | ≥ 9         | Frontend deps                                                                       |
+| uv              | recent      | Backend deps (replaces pip/venv)                                                    |
+| just            | ≥ 1.0       | Task runner                                                                         |
+| Claude Code CLI | recent      | Auth via `claude login` — uses your Pro/Max OAuth credits, no `ANTHROPIC_API_KEY` needed |
+
+```bash
+git clone https://github.com/<org>/command-center.git
+cd command-center
+cp command-center-backend/.env.example command-center-backend/.env
+# Edit .env: set PROJECTS_ROOT to your workspace directory
+just dev          # backend → :8000  ·  frontend → :3000
+```
+
+Open **`http://localhost:3000/chat`**. Type a task. Watch a plan appear. Click approve.
+
+**Verify before first use:**
+
+```bash
+claude --print --model haiku "ok"   # must return a single line of text
+just health                          # checks DB, CLI, secrets vault, disk
+```
 
 ---
 
 ## Architecture
 
 ```
-CEO (you)
-   │  natural language request
-   ▼
-┌─────────────────────────────────────────┐
-│              Manager Agent              │
-│         (Claude Sonnet/Opus)            │
-│  Decomposes request → JSON task graph   │
-│  with depends_on dependency resolution  │
-└─────────────────────────────────────────┘
-   │  Plan { tasks[], execution_mode }
-   ▼
-┌─────────────────────────────────────────┐
-│               Dispatcher                │
-│  Parallel-first execution engine        │
-│  Respects depends_on DAG               │
-│  Up to 5 concurrent workers            │
-└──────┬──────────┬──────────┬───────────┘
-       │          │          │
-       ▼          ▼          ▼
-  Employee 1  Employee 2  Employee 3
-  (Haiku)     (Sonnet)    (Sonnet)
-  reads files  writes code  runs tests
-       │          │          │
-       └──────────┴──────────┘
-                  │  results[]
-                  ▼
-┌─────────────────────────────────────────┐
-│         Manager consolidates            │
-│   TL;DR + what was done + next steps   │
-└─────────────────────────────────────────┘
-   │  markdown report
-   ▼
-CEO dashboard (real-time SSE streaming)
+┌─────────────────────────────────────────────────────────┐
+│  Frontend (Next.js 15, App Router)                      │
+│  ─ /chat        ← CEO conversation + plan editor + SSE  │
+│  ─ /projects    ← per-project skills + MCP config       │
+│  ─ /tasks       ← history + cost analytics              │
+│  ─ /settings    ← integrations (GitHub, Linear)         │
+└─────────────────────┬───────────────────────────────────┘
+                      │ HTTP + SSE
+┌─────────────────────▼───────────────────────────────────┐
+│  Backend (FastAPI + SQLite/WAL + asyncio)               │
+│  ─ Manager agent: drafts plan from CEO request          │
+│  ─ Dispatcher: spawns Worker agents per task            │
+│  ─ Workers: each = `claude --print` subprocess          │
+│  ─ Memory store: recallable past decisions              │
+│  ─ Integrations: GitHub auto-PR, Linear sync            │
+└─────────────────────┬───────────────────────────────────┘
+                      │ subprocess
+                      ▼
+              `claude` CLI (your auth)
+                      ↓
+             Anthropic API (your OAuth)
 ```
 
-The Manager assigns the right model to each task automatically:
-- **Haiku** → reading, search, classification, summaries (5× faster)
+The Manager assigns models to tasks automatically:
+
+- **Haiku** → reading, search, classification, summaries (5× cheaper)
 - **Sonnet** → code writing, refactoring, tests (default)
-- **Opus** → reserved for deep architectural decisions only
-
----
-
-## Features
-
-- **Parallel-first execution** — tasks without dependencies run simultaneously
-- **Real-time streaming UI** — watch each agent's output as it streams via SSE
-- **Task dependency graph** — `depends_on` ensures correct ordering when needed
-- **Per-task cost & token tracking** — know exactly what each task cost
-- **RTK integration** — bash outputs compressed 60–90% before entering context
-- **Project-aware** — agents work inside your actual project directories
-- **Zen Japanese UI** — because agent infrastructure should be beautiful
+- **Opus** → deep architectural reasoning (opt-in)
 
 ---
 
 ## Stack
 
-| Layer | Tech |
-|---|---|
-| Backend | FastAPI, SQLAlchemy async, SQLite, SSE-Starlette |
-| Agents | Claude Code CLI (`claude --print --output-format stream-json`) |
-| Frontend | Next.js 15, Tailwind CSS v4, Framer Motion, Zustand |
-| Token savings | [RTK](https://github.com/rtk-ai/rtk) |
+| Layer     | Tech                                                            |
+| --------- | --------------------------------------------------------------- |
+| Backend   | FastAPI, SQLAlchemy async, SQLite WAL, SSE-Starlette, structlog |
+| Agents    | `claude --print --output-format stream-json`                    |
+| Frontend  | Next.js 15, Tailwind v4, Framer Motion, Zustand, TanStack Query |
+| Security  | Fernet-encrypted tokens, `rehype-sanitize`, path traversal hardening |
 
 ---
 
-## Quick Start
-
-### Prerequisites
-
-- [Claude Code CLI](https://docs.anthropic.com/claude-code) installed and authenticated (`claude --version`)
-- Python 3.13+ with [uv](https://docs.astral.sh/uv/)
-- Node.js 20+ with [pnpm](https://pnpm.io/)
-- (Optional) [RTK](https://github.com/rtk-ai/rtk) for token savings
-
-### 1. Clone
+## Common commands
 
 ```bash
-git clone https://github.com/Blazek1nn/command-center
-cd command-center
-```
-
-### 2. Backend
-
-```bash
-cd command-center-backend
-uv sync
-uv run uvicorn command_center.main:app --reload --port 8000
-```
-
-### 3. Frontend
-
-```bash
-cd command-center-frontend
-pnpm install
-pnpm dev
-```
-
-### 4. (Optional) Token savings with RTK
-
-```bash
-# Install RTK
-curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
-
-# Configure for Claude Code
-rtk init -g
-```
-
-### 5. Open
-
-Navigate to [http://localhost:3000/chat](http://localhost:3000/chat)
-
----
-
-## One-command dev (meta orchestrator)
-
-```bash
-cd command-center-meta
-node scripts/dev.mjs
-```
-
-Starts backend + frontend in parallel, all output color-coded in one terminal. No CMD windows.
-
----
-
-## Configuration
-
-Create `command-center-backend/.env`:
-
-```env
-# Project directory where agents will work
-PROJECTS_ROOT=/path/to/your/projects
-
-# Model for the Manager (default: sonnet)
-DEFAULT_MANAGER_MODEL=sonnet
-
-# Max parallel agents (default: 5)
-MAX_PARALLEL_WORKERS=5
-
-# Agent task timeout in seconds (default: 600)
-TASK_TIMEOUT_SECONDS=600
+just dev          # backend + frontend in parallel
+just test         # pytest + frontend tests
+just typecheck    # mypy + tsc --noEmit
+just lint         # ruff + eslint
+just format       # ruff format + prettier
+just health       # GET /health/deep — DB, CLI, secrets, disk
+just reset-db     # nukes the local SQLite (destructive, asks first)
 ```
 
 ---
 
-## How it works — in depth
-
-### 1. CEO sends a message
+## Repo layout
 
 ```
-"Add E2E tests to the auth flow and fix the flaky login test"
+command-center/
+├── command-center-backend/   FastAPI orchestrator (Python 3.13)
+├── command-center-frontend/  Next.js 15 UI (TypeScript, React 19)
+├── command-center-meta/      Dev runner (backend + frontend, color-coded logs)
+├── docs/                     Whitepaper, architecture, case studies
+├── justfile                  Top-level task runner
+├── LICENSE                   Apache 2.0
+├── CONTRIBUTING.md
+├── CLA.md
+├── CODE_OF_CONDUCT.md
+└── SECURITY.md
 ```
-
-### 2. Manager generates a parallel task plan
-
-```json
-{
-  "understanding": "Add E2E tests to auth flow and fix flaky login test",
-  "execution_mode": "parallel",
-  "tasks": [
-    {
-      "title": "Audit existing auth tests",
-      "model": "haiku",
-      "specialty": "triage",
-      "depends_on": []
-    },
-    {
-      "title": "Fix flaky login test",
-      "model": "sonnet",
-      "specialty": "tests",
-      "depends_on": [0]
-    },
-    {
-      "title": "Write E2E auth flow tests",
-      "model": "sonnet",
-      "specialty": "tests",
-      "depends_on": [0]
-    }
-  ]
-}
-```
-
-### 3. Dispatcher executes
-
-- Task 0 (haiku) runs immediately
-- Tasks 1 and 2 run in parallel once Task 0 completes
-
-### 4. Manager consolidates
-
-Returns a markdown report: TL;DR, what was done, problems found, next steps.
 
 ---
 
-## Windows notes
+## Troubleshooting
 
-CMD window suppression is built-in — a background thread intercepts any console windows created by agent subprocesses and hides them immediately.
+| Symptom | Cause | Fix |
+|---|---|---|
+| `claude: command not found` | CLI not installed / not in PATH | Install Claude Code CLI; reopen terminal |
+| Tasks fail with `exit code 1` | CLI not logged in / token expired | `claude login`; test with `claude --print --model haiku "ok"` |
+| SSE events not arriving | Wrong API URL | Check `NEXT_PUBLIC_API_URL` in `command-center-frontend/.env.local` |
+| `Address already in use :8000` | Zombie process on port | `netstat -ano \| findstr 8000` (Windows) or `lsof -i :8000` (Unix); kill PID |
+| Tasks fail when using MCP servers | MCP requested interactive permission | Add `headless_mcps` list to your project's `mcp.json`; see [SECURITY.md](./SECURITY.md) |
 
 ---
+
+## Status
+
+**v0.3 (alpha).** Functional, used daily. Single-user. Local-only by default.
+
+**Known limitations** — see [SECURITY.md](./SECURITY.md). Headlines: no multi-user auth; local-machine trust model; don't expose to the internet without a reverse proxy.
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md). Open an issue first; one concern per PR; lint+test+typecheck green.
+
+By contributing you agree to the [CLA](./CLA.md).
 
 ## License
 
-MIT
+[Apache 2.0](./LICENSE) · Copyright 2026 Command Center contributors · See [NOTICE](./NOTICE).
+
+The Claude Code CLI is a separate product of Anthropic PBC, not bundled with this project.

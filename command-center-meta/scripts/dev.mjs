@@ -52,7 +52,6 @@ function startProcess(label, bin, args, cwd, color) {
   const proc = spawn(bin, args, {
     cwd,
     stdio: "pipe",
-    windowsHide: true, // ← suprime janelas CMD no Windows
   });
 
   proc.stdout.on("data", (chunk) => {

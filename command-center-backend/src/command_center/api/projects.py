@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -9,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from command_center.db.models import Project, ProjectStatus
 from command_center.db.session import session_dependency
+from command_center.project_inspect import detect_stack
+from command_center.project_settings import ensure_project_claude_settings
 
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -27,9 +30,11 @@ class ProjectOut(BaseModel):
     description: str | None
     status: str
     created_at: datetime
+    # Tech stack detectado (ex: ["Python", "FastAPI"]) — computed, sem migration.
+    tech_stack: list[str] = []
 
     @classmethod
-    def from_row(cls, row: Project) -> "ProjectOut":
+    def from_row(cls, row: Project, *, with_stack: bool = True) -> "ProjectOut":
         return cls(
             id=row.id,
             name=row.name,
@@ -37,6 +42,7 @@ class ProjectOut(BaseModel):
             description=row.description,
             status=row.status.value if hasattr(row.status, "value") else str(row.status),
             created_at=row.created_at,
+            tech_stack=detect_stack(row.path) if with_stack else [],
         )
 
 
@@ -60,9 +66,22 @@ async def create_project(
     ).scalar_one_or_none()
     if existing:
         raise HTTPException(status_code=409, detail="Projeto já existe.")
+
+    # Auto-cria a pasta do projeto pra que o dispatcher possa cwd lá e os
+    # Employees consigam escrever sem bater em sandbox restriction.
+    # Expande ~ se presente. Falha silenciosamente se não puder criar (ex.:
+    # permissões); o dispatcher tem fallback.
+    expanded_path = str(Path(body.path).expanduser())
+    try:
+        Path(expanded_path).mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    # Libera Write/Edit/Bash pros workers rodando neste projeto.
+    ensure_project_claude_settings(expanded_path)
+
     row = Project(
         name=body.name,
-        path=body.path,
+        path=expanded_path,
         description=body.description,
         status=ProjectStatus.ACTIVE,
     )

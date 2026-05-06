@@ -1,0 +1,120 @@
+{
+  "name": "command-center",
+  "displayName": "Command Center — AI Agent Orchestrator",
+  "description": "Plan, approve, and dispatch coding tasks to a fleet of Claude Code agents — without leaving your editor.",
+  "version": "0.1.0",
+  "publisher": "command-center-dev",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/command-center-dev/command-center"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "agent",
+    "claude",
+    "orchestrator",
+    "code generation",
+    "multi-agent"
+  ],
+  "icon": "media/icon.png",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "commandCenter.newTask",
+        "title": "Command Center: New Task",
+        "icon": "$(send)"
+      },
+      {
+        "command": "commandCenter.showActivity",
+        "title": "Command Center: Show Activity",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "commandCenter.openSettings",
+        "title": "Command Center: Settings"
+      },
+      {
+        "command": "commandCenter.showWelcome",
+        "title": "Command Center: Welcome / Getting Started"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "commandCenter.newTask",
+        "key": "ctrl+shift+a",
+        "mac": "cmd+shift+a",
+        "when": "!inputFocus"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "commandCenter",
+          "title": "Command Center",
+          "icon": "media/sidebar-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "commandCenter": [
+        {
+          "type": "webview",
+          "id": "commandCenter.activityView",
+          "name": "Agent Activity"
+        }
+      ]
+    },
+    "menus": {
+      "editor/title": [
+        {
+          "command": "commandCenter.newTask",
+          "group": "navigation",
+          "when": "workspaceFolderCount > 0"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Command Center",
+      "properties": {
+        "commandCenter.backendUrl": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "description": "URL of the Command Center backend. Change if you're running it on a different port."
+        },
+        "commandCenter.autoDetectProject": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically use the current workspace folder as the project context."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.39",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.21.0",
+    "@typescript-eslint/parser": "^6.21.0",
+    "@vscode/vsce": "^2.32.0",
+    "eslint": "^8.57.1",
+    "typescript": "^5.9.3"
+  }
+}

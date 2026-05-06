@@ -9,9 +9,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,6 +26,23 @@ from command_center.config import settings
 
 log = structlog.get_logger(__name__)
 
+# How long to wait for subprocess reap after kill(). On Windows, kill() is async
+# (TerminateProcess) — a small grace window lets the OS finalize before we move on.
+SUBPROCESS_REAP_TIMEOUT_S = 3
+
+# Watchdog: detecta permission prompts de MCPs (que IGNORAM
+# --dangerously-skip-permissions) e mata o processo se ele ficou parado.
+# Padrões observados em prompts MCP + Claude CLI permission dialogs.
+_PERMISSION_PATTERNS = re.compile(
+    r"(allow this tool|requires permission|awaiting approval|"
+    r"do you want to proceed|approve this|grant permission|"
+    r"permission denied|press y to continue)",
+    re.IGNORECASE,
+)
+# Tempo máximo sem progresso (stdout/stderr line) APÓS detectar prompt
+# antes de matar o processo. 10s é generoso pra MCP que demora pra
+# emitir output mas suficiente pra não pendurar dispatcher.
+_PERMISSION_HANG_TIMEOUT_S = 10.0
 
 ModelAlias = Literal["opus", "sonnet", "haiku"]
 
@@ -91,6 +110,9 @@ class Done:
 class RunnerError:
     message: str
     stderr: str | None = None
+    # Flag pra dispatcher distinguir falha de permissão (mensagem específica
+    # pra UI) de falha genérica.
+    permission_blocked: bool = False
 
 
 RunEvent = TextDelta | ToolUse | ToolResult | Done | RunnerError
@@ -112,6 +134,8 @@ class ClaudeRunner:
         prompt: str,
         model: ModelAlias | str,
         system_prompt: str | None,
+        skills_block: str | None = None,
+        mcp_config_path: Path | None = None,
     ) -> list[str]:
         resolved = MODEL_MAP.get(model, model)
         args: list[str] = [
@@ -122,9 +146,21 @@ class ClaudeRunner:
             "--output-format",
             "stream-json",
             "--verbose",
+            # Workers rodam headless — sem UI pra aprovar permissions. Sem essa
+            # flag, qualquer Write/Edit/Bash trava esperando dialog que ninguém
+            # vai clicar. O cwd já é confinado ao project dir (dispatcher cria),
+            # então o blast radius é o próprio projeto.
+            "--dangerously-skip-permissions",
         ]
+        # Base system prompt do employee/manager
         if system_prompt:
             args.extend(["--append-system-prompt", system_prompt])
+        # Skills do projeto — injetadas como bloco separado (Frente δ)
+        if skills_block:
+            args.extend(["--append-system-prompt", skills_block])
+        # MCP config — servidores externos (Frente δ)
+        if mcp_config_path and mcp_config_path.exists():
+            args.extend(["--mcp-config", str(mcp_config_path)])
         args.append(prompt)
         return args
 
@@ -134,8 +170,10 @@ class ClaudeRunner:
         model: ModelAlias | str = "sonnet",
         cwd: Path | str | None = None,
         system_prompt: str | None = None,
+        skills_block: str | None = None,
+        mcp_config_path: Path | None = None,
     ) -> AsyncIterator[RunEvent]:
-        args = self._build_args(prompt, model, system_prompt)
+        args = self._build_args(prompt, model, system_prompt, skills_block, mcp_config_path)
         cwd_str = str(cwd) if cwd else None
 
         log.info(
@@ -144,6 +182,8 @@ class ClaudeRunner:
             cwd=cwd_str,
             prompt_chars=len(prompt),
             has_system=bool(system_prompt),
+            has_skills=bool(skills_block),
+            has_mcp=bool(mcp_config_path),
         )
 
         # No Windows, asyncio.create_subprocess_exec frequentemente cai num
@@ -162,41 +202,111 @@ class ClaudeRunner:
         queue: asyncio.Queue[RunEvent | None] = asyncio.Queue()
         env = os.environ.copy()
 
-        creationflags = 0
-        startupinfo = None
-        if sys.platform == "win32":
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = 0  # SW_HIDE
-
-        try:
-            proc = subprocess.Popen(
-                args,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=cwd_str,
-                env=env,
-                bufsize=1,  # line-buffered
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                creationflags=creationflags,
-                startupinfo=startupinfo,
-            )
-        except FileNotFoundError as exc:
-            yield RunnerError(message=f"CLI '{self.cli_path}' não encontrado: {exc}")
-            return
+        # Windows: usa hidden desktop pra ZERAR popups de claude.exe e descendentes.
+        # Outras plataformas (ou env CC_DISABLE_HIDDEN_DESKTOP=1 em testes):
+        # subprocess.Popen normal.
+        proc: Any
+        use_hidden = (
+            sys.platform == "win32"
+            and not os.environ.get("CC_DISABLE_HIDDEN_DESKTOP")
+        )
+        if use_hidden:
+            try:
+                from command_center.win_hidden_desktop import popen_on_hidden_desktop
+                proc = popen_on_hidden_desktop(args, cwd=cwd_str, env=env)
+            except FileNotFoundError as exc:
+                yield RunnerError(message=f"CLI '{self.cli_path}' não encontrado: {exc}")
+                return
+            except OSError as exc:
+                # Fallback pra Popen normal se hidden desktop falhar (ex: permissions)
+                log.warning("hidden_desktop.failed_fallback_popen", error=str(exc))
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0
+                try:
+                    proc = subprocess.Popen(
+                        args,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        cwd=cwd_str,
+                        env=env,
+                        bufsize=1,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        creationflags=creationflags,
+                        startupinfo=startupinfo,
+                    )
+                except FileNotFoundError as exc2:
+                    yield RunnerError(message=f"CLI '{self.cli_path}' não encontrado: {exc2}")
+                    return
+        else:
+            try:
+                proc = subprocess.Popen(
+                    args,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    cwd=cwd_str,
+                    env=env,
+                    bufsize=1,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            except FileNotFoundError as exc:
+                yield RunnerError(message=f"CLI '{self.cli_path}' não encontrado: {exc}")
+                return
 
         cancel_flag = threading.Event()
         accumulated: list[str] = []
+
+        # Estado compartilhado pelo watchdog: timestamp da última atividade
+        # e flag de prompt detectado. Threading.Lock pra evitar leitura suja.
+        state_lock = threading.Lock()
+        state = {
+            "last_activity_ts": time.monotonic(),
+            "permission_detected_ts": None,  # None até detectar
+            "permission_killed": False,
+        }
+
+        def _bump_activity() -> None:
+            with state_lock:
+                state["last_activity_ts"] = time.monotonic()
 
         def _emit(event: RunEvent) -> None:
             asyncio.run_coroutine_threadsafe(queue.put(event), loop)
 
         def _emit_sentinel() -> None:
             asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+
+        def _watchdog() -> None:
+            """Mata o processo se prompt de permissão foi detectado e não houve
+            progresso por _PERMISSION_HANG_TIMEOUT_S. Sem isso, MCP travado
+            pendura SSE indefinidamente."""
+            while not cancel_flag.is_set() and proc.poll() is None:
+                time.sleep(1.0)
+                with state_lock:
+                    perm_ts = state["permission_detected_ts"]
+                    last_ts = state["last_activity_ts"]
+                if perm_ts is None:
+                    continue
+                idle = time.monotonic() - last_ts
+                if idle >= _PERMISSION_HANG_TIMEOUT_S:
+                    log.warning(
+                        "claude_runner.permission_hang_kill",
+                        idle_seconds=idle,
+                        prompt_detected_at=perm_ts,
+                    )
+                    with state_lock:
+                        state["permission_killed"] = True
+                    try:
+                        proc.kill()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return
 
         def _reader() -> None:
             stderr_buf: list[str] = []
@@ -206,9 +316,21 @@ class ClaudeRunner:
                     return
                 for line in proc.stderr:
                     stderr_buf.append(line)
+                    _bump_activity()
+                    if _PERMISSION_PATTERNS.search(line):
+                        with state_lock:
+                            if state["permission_detected_ts"] is None:
+                                state["permission_detected_ts"] = time.monotonic()
+                                log.warning(
+                                    "claude_runner.permission_prompt_detected",
+                                    line=line.strip()[:200],
+                                )
 
             stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
             stderr_thread.start()
+
+            watchdog_thread = threading.Thread(target=_watchdog, daemon=True)
+            watchdog_thread.start()
 
             saw_done = False
             try:
@@ -217,9 +339,15 @@ class ClaudeRunner:
                 for raw in proc.stdout:
                     if cancel_flag.is_set():
                         break
+                    _bump_activity()
                     line = raw.strip()
                     if not line:
                         continue
+                    # Também check stdout — alguns prompts podem aparecer aqui
+                    if _PERMISSION_PATTERNS.search(line):
+                        with state_lock:
+                            if state["permission_detected_ts"] is None:
+                                state["permission_detected_ts"] = time.monotonic()
                     try:
                         msg = json.loads(line)
                     except json.JSONDecodeError:
@@ -238,6 +366,23 @@ class ClaudeRunner:
                     return
 
                 stderr_thread.join(timeout=1.0)
+                with state_lock:
+                    was_perm_killed = state["permission_killed"]
+                if was_perm_killed:
+                    _emit(
+                        RunnerError(
+                            message=(
+                                "Worker bloqueado por prompt de permissão (provavelmente "
+                                "um MCP pediu aprovação). Edite .claude/mcp.json do projeto "
+                                "para remover o servidor que pede permissão, ou rode em modo "
+                                "interativo. --dangerously-skip-permissions só cobre tools "
+                                "built-in da Anthropic, não MCPs externos."
+                            ),
+                            stderr="".join(stderr_buf)[-2000:],
+                            permission_blocked=True,
+                        ),
+                    )
+                    return
                 if proc.returncode != 0 and not saw_done:
                     stderr_text = "".join(stderr_buf)
                     _emit(
@@ -264,7 +409,8 @@ class ClaudeRunner:
             cancel_flag.set()
             try:
                 proc.kill()
-            except ProcessLookupError:
+                await asyncio.to_thread(proc.wait, timeout=SUBPROCESS_REAP_TIMEOUT_S)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
                 pass
             raise
         finally:
@@ -272,7 +418,8 @@ class ClaudeRunner:
             if proc.poll() is None:
                 try:
                     proc.kill()
-                except ProcessLookupError:
+                    await asyncio.to_thread(proc.wait, timeout=SUBPROCESS_REAP_TIMEOUT_S)
+                except (ProcessLookupError, subprocess.TimeoutExpired):
                     pass
 
     @staticmethod
