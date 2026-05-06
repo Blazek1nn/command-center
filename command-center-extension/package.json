@@ -1,9 +1,9 @@
 {
-  "name": "command-center",
+  "name": "cc-agent-orchestrator",
   "displayName": "Command Center — AI Agent Orchestrator",
   "description": "Plan, approve, and dispatch coding tasks to a fleet of Claude Code agents — without leaving your editor.",
   "version": "0.1.0",
-  "publisher": "command-center-dev",
+  "publisher": "BlazeK1nn",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",

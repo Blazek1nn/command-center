@@ -18,6 +18,11 @@ node_modules/
 *.sqlite
 *.log
 
+# Env files (all variants, all subdirs)
+**/.env
+.env.*
+*.env
+
 # Private Claude Code session data
 .claude/
 
